@@ -63,6 +63,15 @@ void venc_dev::venc_get_consumer_usage(OMX_U32* usage)
         DEBUG_PRINT_INFO("Clear UBWC consumer usage bits as 8-bit linear color requested");
     }
 
+    if (venc_handle->is_flip_conv_needed(NULL))
+        *usage = *usage | GRALLOC_USAGE_SW_READ_OFTEN;
+
+    if (m_codec == OMX_VIDEO_CodingImageHEIC) {
+        DEBUG_PRINT_INFO("Clear UBWC and set HEIF consumer usage bit");
+        *usage &= ~GRALLOC_USAGE_PRIVATE_ALLOC_UBWC;
+        *usage |= GRALLOC_USAGE_PRIVATE_HEIF_VIDEO;
+    }
+
     DEBUG_PRINT_INFO("venc_get_consumer_usage 0x%x", *usage);
 }
 
@@ -129,10 +138,18 @@ bool venc_dev::venc_set_config(void *configData, OMX_INDEXTYPE index)
                 OMX_CONFIG_MIRRORTYPE *mirror = (OMX_CONFIG_MIRRORTYPE*) configData;
                 DEBUG_PRINT_LOW("venc_set_param: OMX_IndexConfigCommonMirror");
 
-                if (venc_set_mirror(mirror->eMirror) == false) {
+                if (!venc_handle->m_no_vpss && venc_set_mirror(mirror->eMirror) == false) {
                     DEBUG_PRINT_ERROR("ERROR: Setting OMX_IndexConfigCommonMirror failed");
                     return false;
+                } else if(venc_handle->m_no_vpss) {
+                    if ((venc_handle->m_nOperatingRate >> 16) <= 30) {
+                        venc_handle->initFastCV();
+                    } else {
+                        DEBUG_PRINT_ERROR("ERROR: Flip not supported fps %u",
+                                venc_handle->m_nOperatingRate >> 16);
+                    }
                 }
+
                 break;
             }
         case OMX_IndexConfigCommonRotate:
@@ -144,7 +161,7 @@ bool venc_dev::venc_set_config(void *configData, OMX_INDEXTYPE index)
                    return false;
                 }
 
-                if (venc_handle->m_c2d_rotation) {
+                if (venc_handle->m_no_vpss) {
                     if (venc_prepare_c2d_rotation(config_rotation->nRotation) == false) {
                         DEBUG_PRINT_ERROR("ERROR: venc_prepare_c2d_rotation failed");
                         return false;
@@ -1258,6 +1275,17 @@ bool venc_dev::venc_set_profile(OMX_U32 eProfile)
     } else {
         DEBUG_PRINT_ERROR("Wrong CODEC");
         return false;
+    }
+
+    if (m_disable_hdr & ENC_HDR_DISABLE_FLAG) {
+        if (m_sVenc_cfg.codectype == V4L2_PIX_FMT_HEVC) {
+            if (eProfile == OMX_VIDEO_HEVCProfileMain10 ||
+                eProfile == OMX_VIDEO_HEVCProfileMain10HDR10 ||
+                eProfile == OMX_VIDEO_HEVCProfileMain10HDR10Plus) {
+                DEBUG_PRINT_ERROR("%s: HDR profile unsupported", __FUNCTION__);
+                return false;
+            }
+        }
     }
 
     if (!profile_level_converter::convert_omx_profile_to_v4l2(m_sVenc_cfg.codectype, eProfile, &control.value)) {
