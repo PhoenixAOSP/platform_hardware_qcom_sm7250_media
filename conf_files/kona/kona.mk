@@ -3,9 +3,9 @@ CONFIG_PATH := $(QCOM_MEDIA_ROOT)/conf_files/kona
 
 PRODUCT_COPY_FILES += \
     $(CONFIG_PATH)/media_codecs.xml:$(TARGET_COPY_OUT_VENDOR)/etc/media_codecs.xml \
-    $(CONFIG_PATH)/media_codecs_performance.xml:$(TARGET_COPY_OUT_VENDOR)/etc/media_codecs_performance.xml \
+    $(CONFIG_PATH)/media_codecs_performance.xml:$(TARGET_COPY_OUT_VENDOR)/etc/media_codecs_performance_kona_vendor.xml \
     $(CONFIG_PATH)/media_codecs_performance.xml:$(TARGET_COPY_OUT_VENDOR)/etc/media_codecs_performance_kona.xml \
-    $(CONFIG_PATH)/media_codecs_vendor.xml:$(TARGET_COPY_OUT_VENDOR)/etc/media_codecs_vendor.xml \
+    $(CONFIG_PATH)/media_codecs_vendor.xml:$(TARGET_COPY_OUT_VENDOR)/etc/media_codecs_kona_vendor.xml \
     $(CONFIG_PATH)/media_codecs_vendor.xml:$(TARGET_COPY_OUT_VENDOR)/etc/media_codecs_kona.xml \
     $(CONFIG_PATH)/media_codecs_vendor_audio.xml:$(TARGET_COPY_OUT_VENDOR)/etc/media_codecs_vendor_audio.xml \
     $(CONFIG_PATH)/media_profiles.xml:$(TARGET_COPY_OUT_VENDOR)/etc/media_profiles_vendor.xml \
@@ -30,10 +30,8 @@ ifeq ($(GENERIC_ODM_IMAGE),true)
   PRODUCT_COPY_FILES += \
     device/qcom/common/media/media_profiles.xml:TARGET_COPY_OUT_ODM)/etc/media_profiles_V1_0.xml
 else
-  $(warning "Enabling codec2.0 SW only for non-generic odm build variant")
-  #Rank OMX SW codecs lower than OMX HW codecs
-  PRODUCT_PROPERTY_OVERRIDES += debug.stagefright.omx_default_rank.sw-audio=1
-  PRODUCT_PROPERTY_OVERRIDES += debug.stagefright.omx_default_rank=0
+  $(warning "Enabling codec2.0 non-audio SW only for non-generic odm build variant")
+PRODUCT_PROPERTY_OVERRIDES += debug.stagefright.omx_default_rank=0
   PRODUCT_COPY_FILES += \
     $(CONFIG_PATH)/media_profiles.xml:$(TARGET_COPY_OUT_ODM)/etc/media_profiles_V1_0.xml
 endif

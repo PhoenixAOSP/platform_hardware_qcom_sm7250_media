@@ -81,7 +81,6 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define HEVC_MAIN10_START (HEVC_MAIN_START + 13)
 #define POLL_TIMEOUT 1000
 #define MAX_SUPPORTED_SLICES_PER_FRAME 28 /* Max supported slices with 32 output buffers */
-#define ENC_HDR_DISABLE_FLAG 0x2
 
 #define SZ_4K 0x1000
 #define SZ_1M 0x100000
@@ -98,6 +97,8 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #undef LOG_TAG
 #define LOG_TAG "OMX-VENC: venc_dev"
+
+#define LUMINANCE_MULTIPLICATION_FACTOR 10000
 
 //constructor
 venc_dev::venc_dev(class omx_venc *venc_class)
@@ -186,6 +187,9 @@ venc_dev::venc_dev(class omx_venc *venc_class)
 
     property_get("vendor.vidc.enc.log.extradata", property_value, "0");
     m_debug.extradata_log = atoi(property_value);
+
+    property_get("vendor.vidc.cvp.log.in", property_value, "0");
+    m_debug.cvp_log |= atoi(property_value);
 
 #ifdef _UBWC_
     property_get("vendor.gralloc.disable_ubwc", property_value, "0");
@@ -327,7 +331,7 @@ void* venc_dev::async_venc_message_thread (void *input)
                 venc_msg.buf.flags = 0;
                 venc_msg.buf.ptrbuffer = (OMX_U8 *)omx_venc_base->m_pOutput_pmem[v4l2_buf.index].buffer;
                 venc_msg.buf.clientdata=(void*)omxhdr;
-                venc_msg.buf.timestamp = (uint64_t) v4l2_buf.timestamp.tv_sec * (uint64_t) 1000000 + (uint64_t) v4l2_buf.timestamp.tv_usec;
+                venc_msg.buf.timestamp = (int64_t) v4l2_buf.timestamp.tv_sec * (int64_t) 1000000 + (int64_t) v4l2_buf.timestamp.tv_usec;
 
                 /* TODO: ideally report other types of frames as well
                  * for now it doesn't look like IL client cares about
@@ -949,6 +953,7 @@ int venc_dev::venc_set_format(int format)
 
         switch (color_format) {
         case NV12_128m:
+        case NV12_512:
             return venc_set_color_format((OMX_COLOR_FORMATTYPE)QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m);
         case NV12_UBWC:
             return venc_set_color_format((OMX_COLOR_FORMATTYPE)QOMX_COLOR_FORMATYUV420PackedSemiPlanar32mCompressed);
@@ -1082,6 +1087,17 @@ OMX_ERRORTYPE venc_dev::venc_get_supported_profile_level(OMX_VIDEO_PARAM_PROFILE
         eRet = OMX_ErrorNoMore;
     }
 
+    if (m_disable_hdr & ENC_HDR_DISABLE_FLAG) {
+        if (m_sVenc_cfg.codectype == V4L2_PIX_FMT_HEVC) {
+            if (profileLevelType->eProfile == OMX_VIDEO_HEVCProfileMain10 ||
+                profileLevelType->eProfile == OMX_VIDEO_HEVCProfileMain10HDR10 ||
+                profileLevelType->eProfile == OMX_VIDEO_HEVCProfileMain10HDR10Plus) {
+                DEBUG_PRINT_LOW("%s: HDR profile unsupported", __FUNCTION__);
+                return OMX_ErrorHardware;
+            }
+        }
+    }
+
     DEBUG_PRINT_LOW("get_parameter: OMX_IndexParamVideoProfileLevelQuerySupported for Input port returned Profile:%u, Level:%u",
             (unsigned int)profileLevelType->eProfile, (unsigned int)profileLevelType->eLevel);
     return eRet;
@@ -1130,10 +1146,8 @@ bool venc_dev::venc_get_supported_color_format(unsigned index, OMX_U32 *colorFor
 
 OMX_ERRORTYPE venc_dev::allocate_extradata(struct extradata_buffer_info *extradata_info, int flags)
 {
-    if (extradata_info->allocated) {
-        DEBUG_PRINT_HIGH("2nd allocation return for port = %d",extradata_info->port_index);
+    if (extradata_info->allocated)
         return OMX_ErrorNone;
-    }
 
     if (!extradata_info->buffer_size || !extradata_info->count) {
         DEBUG_PRINT_ERROR("Invalid extradata buffer size(%lu) or count(%d) for port %d",
@@ -1215,6 +1229,45 @@ bool venc_dev::venc_get_output_log_flag()
 {
     return (m_debug.out_buffer_log == 1);
 }
+
+int venc_dev::venc_cvp_log_buffers(const char *metadataName, uint32_t buffer_len, uint8_t *buf)
+{
+    if (!m_debug.cvpfile && m_debug.cvp_log) {
+        int size = 0;
+
+        if (m_sVenc_cfg.codectype == V4L2_PIX_FMT_H264 ||
+            m_sVenc_cfg.codectype == V4L2_PIX_FMT_HEVC) {
+                size = snprintf(m_debug.cvpfile_name, PROPERTY_VALUE_MAX, "%s/enc_cvp_%lu_%lu_%p.bin",
+                        m_debug.log_loc, m_sVenc_cfg.input_width, m_sVenc_cfg.input_height, this);
+        }
+
+        if ((size > PROPERTY_VALUE_MAX) && (size < 0)) {
+            DEBUG_PRINT_ERROR("Failed to open cvp file: %s for logging size:%d",
+                    m_debug.cvpfile_name, size);
+        }
+
+        m_debug.cvpfile = fopen(m_debug.cvpfile_name, "ab");
+        if (!m_debug.cvpfile) {
+            DEBUG_PRINT_ERROR("Failed to open cvp file: %s for logging errno:%d",
+                            m_debug.cvpfile_name, errno);
+            m_debug.cvpfile_name[0] = '\0';
+            return -1;
+        }
+    }
+
+    if (m_debug.cvpfile) {
+        // Truncate or Zero-filled to match the string size to 5
+        char name[6] = {0};
+        for(int i=0; i<5 && i<strlen(metadataName); i++) {
+            name[i] = metadataName[i];
+        }
+        fwrite(name, 5, 1, m_debug.cvpfile);                            // Metadata name
+        fwrite(&buffer_len, sizeof(buffer_len), 1, m_debug.cvpfile);    // Blob size
+        fwrite(buf, buffer_len, 1, m_debug.cvpfile);                    // Blob data
+    }
+    return 0;
+}
+
 
 int venc_dev::venc_output_log_buffers(const char *buffer_addr, int buffer_len, uint64_t timestamp)
 {
@@ -1375,6 +1428,23 @@ int venc_dev::venc_input_log_buffers(OMX_BUFFERHEADERTYPE *pbuffer, int fd, int 
             }
             for (i = 0; i < m_sVenc_cfg.input_height/2; i++) {
                 fwrite(ptemp, m_sVenc_cfg.input_width, 1, m_debug.infile);
+                ptemp += stride;
+            }
+        } else if (color_format == COLOR_FMT_NV12_512) {
+            stride = VENUS_Y_STRIDE(color_format, m_sVenc_cfg.input_width);
+            scanlines = VENUS_Y_SCANLINES(color_format, m_sVenc_cfg.input_height);
+
+            for (i = 0; i < scanlines; i++) {
+                fwrite(ptemp, stride, 1, m_debug.infile);
+                ptemp += stride;
+            }
+            if (metadatamode == 1) {
+                ptemp = pvirt + (stride * scanlines);
+            } else {
+                ptemp = (unsigned char *)pbuffer->pBuffer + (stride * scanlines);
+            }
+            for (i = 0; i < scanlines/2; i++) {
+                fwrite(ptemp, stride, 1, m_debug.infile);
                 ptemp += stride;
             }
         } else if (color_format == COLOR_FMT_RGBA8888) {
@@ -1705,6 +1775,11 @@ void venc_dev::venc_close()
     if (m_debug.extradatafile) {
         fclose(m_debug.extradatafile);
         m_debug.extradatafile = NULL;
+    }
+
+    if (m_debug.cvpfile) {
+        fclose(m_debug.cvpfile);
+        m_debug.cvpfile = NULL;
     }
 }
 
@@ -2439,6 +2514,15 @@ bool venc_dev::venc_get_batch_size(OMX_U32 *size)
     }
 }
 
+bool venc_dev::venc_get_buffer_mode()
+{
+    return metadatamode;
+}
+
+bool venc_dev::venc_is_avtimer_needed()
+{
+    return mUseAVTimerTimestamps;
+}
 
 bool venc_dev::venc_empty_buf(void *buffer, void *pmem_data_buf, unsigned index, unsigned fd)
 {
@@ -2464,8 +2548,6 @@ bool venc_dev::venc_empty_buf(void *buffer, void *pmem_data_buf, unsigned index,
     bufreq.memory = V4L2_MEMORY_USERPTR;
     bufreq.count = m_sInput_buff_property.actualcount;
     bufreq.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-
-    DEBUG_PRINT_LOW("Input buffer length %u, Timestamp = %lld", (unsigned int)bufhdr->nFilledLen, bufhdr->nTimeStamp);
 
     if (pmem_data_buf) {
         DEBUG_PRINT_LOW("\n Internal PMEM addr for i/p Heap UseBuf: %p", pmem_data_buf);
@@ -2637,8 +2719,8 @@ bool venc_dev::venc_empty_buf(void *buffer, void *pmem_data_buf, unsigned index,
                             m_sVenc_cfg.inputformat = isUBWC ? V4L2_PIX_FMT_NV12_UBWC : V4L2_PIX_FMT_NV12;
                             DEBUG_PRINT_INFO("ENC_CONFIG: Input Color = NV12 %s", isUBWC ? "UBWC" : "Linear");
                         } else if (handle->format == HAL_PIXEL_FORMAT_NV12_HEIF) {
-                            m_sVenc_cfg.inputformat = V4L2_PIX_FMT_NV12;
-                            DEBUG_PRINT_INFO("ENC_CONFIG: Input Color = NV12");
+                            m_sVenc_cfg.inputformat = V4L2_PIX_FMT_NV12_512;
+                            DEBUG_PRINT_INFO("ENC_CONFIG: Input Color = NV12_512");
                         } else if (handle->format == HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS_UBWC) {
                             m_sVenc_cfg.inputformat = V4L2_PIX_FMT_NV12_UBWC;
                             DEBUG_PRINT_INFO("ENC_CONFIG: Input Color = NV12_UBWC");
@@ -2961,6 +3043,7 @@ bool venc_dev::venc_empty_buf(void *buffer, void *pmem_data_buf, unsigned index,
             (OMX_U64)input_extradata_info.ion[index].uaddr, (unsigned int)plane[index].m.userptr);
         venc_extradata_log_buffers((char *)plane[extra_idx].m.userptr, index, true);
     }
+    print_v4l2_buffer("QBUF-ETB", &buf);
     rc = ioctl(m_nDriver_fd, VIDIOC_QBUF, &buf);
 
     if (rc) {
@@ -2979,6 +3062,9 @@ unsigned long venc_dev::get_media_colorformat(unsigned long inputformat)
     switch (inputformat) {
         case V4L2_PIX_FMT_NV12:
             color_format = COLOR_FMT_NV12;
+            break;
+        case V4L2_PIX_FMT_NV12_512:
+            color_format = COLOR_FMT_NV12_512;
             break;
         case V4L2_PIX_FMT_NV12_UBWC:
             color_format = COLOR_FMT_NV12_UBWC;
@@ -3119,6 +3205,7 @@ bool venc_dev::venc_empty_batch(OMX_BUFFERHEADERTYPE *bufhdr, unsigned index)
 
             VIDC_TRACE_INT_LOW("ETB-TS", bufTimeStamp / 1000);
 
+            print_v4l2_buffer("QBUF-ETB", &buf);
             rc = ioctl(m_nDriver_fd, VIDIOC_QBUF, &buf);
             if (rc) {
                 DEBUG_PRINT_ERROR("%s: Failed to qbuf (etb) to driver", __func__);
@@ -3232,6 +3319,7 @@ bool venc_dev::venc_fill_buf(void *buffer, void *pmem_data_buf,unsigned index,un
         return false;
     }
 
+    print_v4l2_buffer("QBUF-FTB", &buf);
     rc = ioctl(m_nDriver_fd, VIDIOC_QBUF, &buf);
 
     if (rc) {
@@ -3526,7 +3614,7 @@ unsigned long venc_dev::venc_get_color_format(OMX_COLOR_FORMATTYPE eColorFormat)
     }
 
     if (m_codec == OMX_VIDEO_CodingImageHEIC)
-        format = V4L2_PIX_FMT_NV12;
+        format = V4L2_PIX_FMT_NV12_512;
 
     return format;
 }
@@ -3572,7 +3660,7 @@ bool venc_dev::venc_set_color_format(OMX_COLOR_FORMATTYPE color_format)
     }
 
     if (m_codec == OMX_VIDEO_CodingImageHEIC)
-        m_sVenc_cfg.inputformat = V4L2_PIX_FMT_NV12;
+        m_sVenc_cfg.inputformat = V4L2_PIX_FMT_NV12_512;
 
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
@@ -4424,6 +4512,9 @@ bool venc_dev::venc_get_cvp_metadata(private_handle_t *handle, struct v4l2_buffe
             return false;
         }
         DEBUG_PRINT_LOW("CVP metadata size %d", cvpMetadata.size);
+        if (m_debug.cvp_log) {
+            venc_cvp_log_buffers("CVP", cvpMetadata.size, cvpMetadata.payload);
+        }
     } else {
         DEBUG_PRINT_ERROR("ERROR: CVP metadata not available");
         return false;
@@ -4655,7 +4746,10 @@ bool venc_dev::venc_set_hdr_info(const MasteringDisplay& mastering_disp_info,
         mastering_disp_info.primaries.rgbPrimaries[2][1],
         mastering_disp_info.primaries.whitePoint[0],
         mastering_disp_info.primaries.whitePoint[1],
-        mastering_disp_info.maxDisplayLuminance,
+        // maxDisplayLuminance is in cd/m^2 scale. But the standard requires this field
+        // to be in 0.0001 cd/m^2 scale. So, multiply with LUMINANCE_MULTIPLICATION_FACTOR
+        // and give to be driver
+        mastering_disp_info.maxDisplayLuminance * LUMINANCE_MULTIPLICATION_FACTOR,
         mastering_disp_info.minDisplayLuminance,
         content_light_level_info.maxContentLightLevel,
         content_light_level_info.minPicAverageLightLevel
@@ -4891,13 +4985,15 @@ void venc_dev::venc_set_quality_boost(OMX_BOOL c2d_enable)
     // 2. RCMode is VBR
     // 3. Input is RGBA/RGBA_UBWC (C2D enabled)
     // 4. width <= 960 and height <= 960
-    // 5. FPS <= 30
-    // 6. bitrate < 2Mbps
+    // 5. width >= 400 and height >= 400
+    // 6. FPS <= 30
+    // 7. bitrate < 2Mbps
 
     if (mQualityBoostRequested && c2d_enable &&
         m_sVenc_cfg.codectype == V4L2_PIX_FMT_H264 &&
         rate_ctrl.rcmode == V4L2_MPEG_VIDEO_BITRATE_MODE_VBR &&
         m_sVenc_cfg.dvs_width <= 960 && m_sVenc_cfg.dvs_height <= 960 &&
+        m_sVenc_cfg.dvs_width >= 400 && m_sVenc_cfg.dvs_height >= 400 &&
         (m_sVenc_cfg.fps_num / m_sVenc_cfg.fps_den) <= 30 &&
         bitrate.target_bitrate < VENC_QUALITY_BOOST_BITRATE_THRESHOLD) {
         mQualityBoostEligible = true;
