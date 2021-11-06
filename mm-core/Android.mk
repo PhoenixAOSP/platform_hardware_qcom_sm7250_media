@@ -17,7 +17,7 @@ endif
 #===============================================================================
 
 MPEGH_TARGET_LIST := kona lito bengal
-ifeq ($(call is-board-platform-in-list, $(MPEGH_TARGET_LIST)), true)
+ifneq (,$(call is-board-platform-in-list2, $(MPEGH_TARGET_LIST)))
 OMXCORE_CFLAGS += -DAUDIO_MPEGH_ENABLED
 endif
 
@@ -95,7 +95,7 @@ LOCAL_NOTICE_FILE       := $(LOCAL_PATH)/../NOTICE
 LOCAL_MODULE_TAGS       := optional
 LOCAL_VENDOR_MODULE     := true
 LOCAL_SHARED_LIBRARIES  := liblog libdl libcutils
-ifeq ($(call is-board-platform-in-list, $(MSM_VIDC_TARGET_LIST)),true)
+ifneq (,$(call is-board-platform-in-list2, $(MSM_VIDC_TARGET_LIST)))
 ifeq ($(VIDC_STUB_HAL),false)
 LOCAL_SHARED_LIBRARIES  += libplatformconfig
 endif
@@ -135,7 +135,7 @@ LOCAL_NOTICE_FILE       := $(LOCAL_PATH)/../NOTICE
 LOCAL_MODULE_TAGS       := optional
 LOCAL_VENDOR_MODULE     := true
 LOCAL_SHARED_LIBRARIES  := liblog libdl libcutils
-ifeq ($(call is-board-platform-in-list, $(MSM_VIDC_TARGET_LIST)),true)
+ifneq (,$(call is-board-platform-in-list2, $(MSM_VIDC_TARGET_LIST)))
 ifeq ($(VIDC_STUB_HAL),false)
 LOCAL_SHARED_LIBRARIES  += libplatformconfig
 endif
